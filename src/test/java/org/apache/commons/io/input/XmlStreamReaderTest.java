@@ -17,7 +17,9 @@
 package org.apache.commons.io.input;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -30,7 +32,9 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.charset.StandardCharsets;
 import java.text.MessageFormat;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -39,6 +43,8 @@ import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.DefaultLocale;
 
 public class XmlStreamReaderTest {
+    private static final String XML7 = "xml-prolog-encoding-no-version";
+    private static final String XML6 = "xml-prolog-encoding-new-line";
     private static final String XML5 = "xml-prolog-encoding-spaced-single-quotes";
     private static final String XML4 = "xml-prolog-encoding-single-quotes";
     private static final String XML3 = "xml-prolog-encoding-double-quotes";
@@ -67,6 +73,16 @@ public class XmlStreamReaderTest {
         xmlReader.close();
 
         is = getXmlStream("no-bom", XML5, encoding, encoding);
+        xmlReader = new XmlStreamReader(is);
+        assertEquals(xmlReader.getEncoding(), encoding);
+        xmlReader.close();
+
+        is = getXmlStream("no-bom", XML6, encoding, encoding);
+        xmlReader = new XmlStreamReader(is);
+        assertEquals(xmlReader.getEncoding(), encoding);
+        xmlReader.close();
+
+        is = getXmlStream("no-bom", XML7, encoding, encoding);
         xmlReader = new XmlStreamReader(is);
         assertEquals(xmlReader.getEncoding(), encoding);
         xmlReader.close();
@@ -413,6 +429,40 @@ public class XmlStreamReaderTest {
         xmlReader.close();
     }
 
+    /**
+     * CVE-2024-47554: matching the encoding of a crafted prolog must not consume excessive CPU
+     * through regular expression backtracking.
+     */
+    @Test
+    public void testEncodingPatternCraftedPrologNoExcessiveBacktracking() {
+        final StringBuilder sb = new StringBuilder("<?xml");
+        for (int i = 0; i < 50000; i++) {
+            sb.append("<?xml encoding");
+        }
+        final String crafted = sb.toString();
+        assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> assertFalse(XmlStreamReader.ENCODING_PATTERN.matcher(crafted).find()));
+    }
+
+    /**
+     * CVE-2024-47554: a crafted prolog filling the prolog buffer is handled promptly and falls back to the
+     * default encoding.
+     */
+    @Test
+    public void testCraftedPrologFillingBuffer() {
+        final StringBuilder sb = new StringBuilder("<?xml");
+        while (sb.length() < IOUtils.DEFAULT_BUFFER_SIZE - 32) {
+            sb.append("<?xml encoding");
+        }
+        sb.append("?>\n<root/>");
+        final byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+        assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+            try (final XmlStreamReader xmlReader = new XmlStreamReader(new ByteArrayInputStream(bytes))) {
+                assertEquals("UTF-8", xmlReader.getEncoding());
+            }
+        });
+    }
+
     // XML Stream generator
 
     private static final int[] NO_BOM_BYTES = {};
@@ -438,6 +488,13 @@ public class XmlStreamReaderTest {
             "<root>{2}</root>");
     private static final MessageFormat XML_WITH_PROLOG = new MessageFormat(
             "<?xml version=\"1.0\"?>\n<root>{2}</root>");
+
+    private static final MessageFormat XML_WITH_PROLOG_AND_ENCODING_NEW_LINES = new MessageFormat(
+            "<?xml\nversion\n=\n\"1.0\"\nencoding\n=\n\"{1}\"\n?>\n<root>{2}</root>");
+
+    private static final MessageFormat XML_EXTERNAL_PARSED_ENTITY_NO_VERSION = new MessageFormat(
+            "<?xml\nencoding\n=\n\"{1}\"\n?>\n<root>{2}</root>");
+
     private static final MessageFormat XML_WITH_PROLOG_AND_ENCODING_DOUBLE_QUOTES = new MessageFormat(
             "<?xml version=\"1.0\" encoding=\"{1}\"?>\n<root>{2}</root>");
     private static final MessageFormat XML_WITH_PROLOG_AND_ENCODING_SINGLE_QUOTES = new MessageFormat(
@@ -456,6 +513,8 @@ public class XmlStreamReaderTest {
         XMLs.put(XML3, XML_WITH_PROLOG_AND_ENCODING_DOUBLE_QUOTES);
         XMLs.put(XML4, XML_WITH_PROLOG_AND_ENCODING_SINGLE_QUOTES);
         XMLs.put(XML5, XML_WITH_PROLOG_AND_ENCODING_SPACED_SINGLE_QUOTES);
+        XMLs.put(XML6, XML_WITH_PROLOG_AND_ENCODING_NEW_LINES);
+        XMLs.put(XML7, XML_EXTERNAL_PARSED_ENTITY_NO_VERSION);
     }
 
     /**
